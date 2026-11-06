@@ -55,6 +55,7 @@ Modern mobile devices (such as iPhones and Android flagships) record video using
 - **Pre-flight Disk Space Safety Verification**: Calculates estimated output size dynamically according to duration, resolution, and target framerate, requiring an extra **+20% safety margin** to prevent filling up the disk mid-process.
 - **Batch & Recursive Scanning**: Process an individual file, a single directory, or recursively scan nested directories (`-R`) while mirroring directory structures in the destination.
 - **Safe Atomic Writes**: Transcodes into hidden partial files (`.filename.part.mov`). If canceled (`Ctrl+C` / `SIGINT` / `SIGTERM`) or if an error occurs, incomplete files are immediately purged, leaving zero corrupted files behind.
+- **In-Place Overwrite Mode**: Replace original files one-by-one safely (`-w`, `--overwrite`). Encodes to an atomic hidden partial file and commits only when FFmpeg completes successfully with zero corruptions or damage if interrupted.
 - **High-Fidelity Audio**: Normalizes audio tracks to uncompressed 16-bit 48 kHz stereo PCM (`pcm_s16le`).
 - **Interactive & CLI Interface**: Run without arguments for a guided interactive prompt with smart defaults, or use CLI flags for headless automation.
 - **Desktop Notifications**: Optional system notifications via `notify-send` when long batch transcoding jobs complete.
@@ -164,6 +165,8 @@ OPTIONS:
   -i, --input DIR|FILE     Source directory or video file (alternative to positional argument)
   -o, --output DIR         Destination directory for converted videos
                            (Default: <input>/transcoded)
+  -w, --overwrite          Replace original source files in-place with transcoded
+                           versions one-by-one upon successful conversion
   -R, --recursive          Scan input directory recursively including subfolders
   -d, --dry-run            Scan sources, verify disk space and print estimate
                            without running FFmpeg
@@ -177,9 +180,19 @@ OPTIONS:
 transcoder
 ```
 
+**Safely transcode and replace files in-place one-by-one:**
+```bash
+transcoder ~/Videos/RawFootage -w
+```
+
 **Convert a single clip to H.264 All-Intra:**
 ```bash
 transcoder my_clip.mov -f h264
+```
+
+**Convert a single clip in-place:**
+```bash
+transcoder my_clip.mov -w
 ```
 
 **Process a directory with 60 fps target framerate to a custom output folder:**
@@ -227,6 +240,13 @@ To avoid leaving corrupted or half-rendered video files in your destination:
 2. Unix signals (`SIGINT`, `SIGTERM`, `EXIT`) are trapped.
 3. If interrupted, the active FFmpeg PID receives `TERM`, the partial file is unlinked, and temporary files in `/tmp` are removed.
 4. On successful completion, `.target_name.part.mov` is atomically renamed to `target_name.mov`.
+
+### Safe In-Place Overwrites (`-w` / `--overwrite`)
+When running with `-w` / `--overwrite`:
+1. **Per-file Transactional Isolation**: Each clip is encoded into a hidden partial file (`.clip.part.mov`) in the source directory.
+2. **Zero Incomplete File Risk**: If interrupted (`Ctrl+C` / `SIGINT` / `SIGTERM`) or if FFmpeg errors out on a corrupted file, the partial file is deleted immediately. The source file being processed remains 100% untouched, as do all files yet to be processed.
+3. **Atomic Replacement**: Only when FFmpeg exits with code `0` and produces a valid output file, the partial file atomically replaces the original (`.mov` replaces `.mov`; `.mp4`/`.m4v` is replaced with `.mov` and the old source is removed).
+4. **Optimized Peak Space Requirement**: Instead of requiring enough free space to duplicate the entire directory, `--overwrite` mode calculates the progressive peak storage required (temporary space for the current file being encoded plus cumulative size differences of previous files + 20% safety margin).
 
 ---
 

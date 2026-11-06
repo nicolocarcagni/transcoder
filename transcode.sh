@@ -40,6 +40,8 @@ SPECIFIC_FILE=""
 OUTPUT_DIR=""
 DRY_RUN=false
 RECURSIVE=false
+OVERWRITE=false
+OUTPUT_DIR_EXPLICIT=false
 
 CURRENT_PARTIAL=""
 FFMPEG_PID=""
@@ -138,6 +140,8 @@ ${COLOR_BOLD}OPTIONS:${COLOR_RESET}
   -i, --input DIR|FILE     Source directory or video file (alternative to positional argument)
   -o, --output DIR         Destination directory for converted videos
                            (Default: <input>/${DEFAULT_OUTPUT_FOLDER_NAME})
+  -w, --overwrite          Replace original files in-place with transcoded files
+                           one-by-one upon successful conversion
   -R, --recursive          Scan input directory recursively including subfolders
   -d, --dry-run            Scan sources, verify disk space and print estimate
                            without running FFmpeg
@@ -153,11 +157,14 @@ ${COLOR_BOLD}EXAMPLES:${COLOR_RESET}
   # Process folder with options and save to custom destination
   $(basename "$0") ~/Videos/iPhone -f prores -r 30 -o ~/Videos/Transcoded_Clips
 
+  # Process folder and replace original files in-place one-by-one safely
+  $(basename "$0") ~/Videos/iPhone -w
+
   # Process an entire folder recursively
   $(basename "$0") ~/Videos/iPhone -R
 
-  # Convert a single video file
-  $(basename "$0") clip.mov -f h264
+  # Convert a single video file in-place
+  $(basename "$0") clip.mov -w
 
   # Dry-run validation
   $(basename "$0") "./raw_footage" -d
@@ -209,7 +216,11 @@ print_banner() {
             echo -e "  ${COLOR_DIM}Scan mode    :${COLOR_RESET} Recursive"
         fi
     fi
-    echo -e "  ${COLOR_DIM}Destination  :${COLOR_RESET} ${OUTPUT_DIR}"
+    if [ "${OVERWRITE}" = true ]; then
+        echo -e "  ${COLOR_DIM}Destination  :${COLOR_RESET} ${COLOR_YELLOW}${COLOR_BOLD}In-place overwrite (replacing source files)${COLOR_RESET}"
+    else
+        echo -e "  ${COLOR_DIM}Destination  :${COLOR_RESET} ${OUTPUT_DIR}"
+    fi
     if [ "${DRY_RUN}" = true ]; then
         echo -e "  ${COLOR_YELLOW}${COLOR_BOLD}MODE         : DRY-RUN (simulation only)${COLOR_RESET}"
     fi
@@ -287,7 +298,35 @@ run_interactive_mode() {
         *) echo -e "${COLOR_RED}Invalid choice.${COLOR_RESET}"; exit 1 ;;
     esac
 
-    OUTPUT_DIR="${INPUT_DIR}/${DEFAULT_OUTPUT_FOLDER_NAME}"
+    echo ""
+    echo "Select destination mode:"
+    echo -e "  ${COLOR_BOLD}1)${COLOR_RESET} Save to subfolder (${DEFAULT_OUTPUT_FOLDER_NAME}/) ${COLOR_GREEN}[Default]${COLOR_RESET}"
+    echo -e "  ${COLOR_BOLD}2)${COLOR_RESET} Overwrite / replace original files in-place one-by-one"
+    echo ""
+
+    local choice_dest
+    read -r -p "Choice [1/2, default: 1]: " choice_dest
+    choice_dest="${choice_dest:-1}"
+
+    case "${choice_dest}" in
+        1)
+            OVERWRITE=false
+            OUTPUT_DIR="${INPUT_DIR}/${DEFAULT_OUTPUT_FOLDER_NAME}"
+            ;;
+        2)
+            echo ""
+            echo -e "${COLOR_YELLOW}⚠ WARNING: In-place overwrite mode replaces original files with transcoded files.${COLOR_RESET}"
+            local confirm_ovw
+            read -r -p "Are you sure you want to replace originals in-place? [y/N]: " confirm_ovw
+            if [[ ! "${confirm_ovw}" =~ ^[yY] ]]; then
+                echo "Aborted by user."
+                exit 0
+            fi
+            OVERWRITE=true
+            OUTPUT_DIR="${INPUT_DIR}"
+            ;;
+        *) echo -e "${COLOR_RED}Invalid choice.${COLOR_RESET}"; exit 1 ;;
+    esac
 }
 
 parse_arguments() {
@@ -346,9 +385,22 @@ parse_arguments() {
                     echo -e "${COLOR_RED}[ERROR] Option $1 requires a directory path.${COLOR_RESET}" >&2
                     exit 1
                 fi
+                if [ "${OVERWRITE}" = true ]; then
+                    echo -e "${COLOR_RED}[ERROR] Options --overwrite and --output cannot be used together.${COLOR_RESET}" >&2
+                    exit 1
+                fi
                 OUTPUT_DIR="$2"
                 OUTPUT_DIR="${OUTPUT_DIR/#\~/$HOME}"
+                OUTPUT_DIR_EXPLICIT=true
                 shift 2
+                ;;
+            -w|--overwrite|--in-place)
+                if [ "${OUTPUT_DIR_EXPLICIT}" = true ]; then
+                    echo -e "${COLOR_RED}[ERROR] Options --overwrite and --output cannot be used together.${COLOR_RESET}" >&2
+                    exit 1
+                fi
+                OVERWRITE=true
+                shift
                 ;;
             -R|-s|--recursive)
                 RECURSIVE=true
@@ -435,7 +487,9 @@ resolve_paths() {
         INPUT_DIR=$(cd "${INPUT_DIR}" && pwd -P)
     fi
 
-    if [ -z "${OUTPUT_DIR}" ]; then
+    if [ "${OVERWRITE}" = true ]; then
+        OUTPUT_DIR="${INPUT_DIR}"
+    elif [ -z "${OUTPUT_DIR}" ]; then
         OUTPUT_DIR="${INPUT_DIR}/${DEFAULT_OUTPUT_FOLDER_NAME}"
     else
         if [ "${DRY_RUN}" = false ]; then
@@ -457,6 +511,7 @@ VALID_RES_STRS=()
 VALID_IS_HDR=()
 VALID_HAS_AUDIO=()
 VALID_TARGET_PATHS=()
+VALID_ORIG_SIZES=()
 TOTAL_SCANNED_COUNT=0
 TOTAL_SKIPPED_COUNT=0
 TOTAL_DURATION_SEC=0
@@ -470,6 +525,7 @@ inspect_and_validate_files() {
     VALID_IS_HDR=()
     VALID_HAS_AUDIO=()
     VALID_TARGET_PATHS=()
+    VALID_ORIG_SIZES=()
     TOTAL_DURATION_SEC=0
     TOTAL_SKIPPED_COUNT=0
 
@@ -596,37 +652,61 @@ inspect_and_validate_files() {
         local stem="${bname%.*}"
         local orig_ext="${bname##*.}"
         local target_name="${stem}_transcoded.mov"
+        local candidate_target=""
 
-        # Determine target directory (preserve relative subfolders if recursive)
-        local target_dir="${OUTPUT_DIR}"
-        if [ "${RECURSIVE}" = true ] && [ -z "${SPECIFIC_FILE}" ]; then
-            local rel_path="${file#"${clean_input_prefix}"}"
-            local rel_dir
-            rel_dir=$(dirname "${rel_path}")
-            if [ "${rel_dir}" != "." ]; then
-                target_dir="${OUTPUT_DIR}/${rel_dir}"
+        if [ "${OVERWRITE}" = true ]; then
+            local file_dir
+            file_dir=$(dirname "${file}")
+            target_name="${stem}.mov"
+            candidate_target="${file_dir}/${target_name}"
+
+            if [[ -n "${seen_targets[${candidate_target}]:-}" ]]; then
+                echo -e "  ${COLOR_RED}✖${COLOR_RESET} ${bname} ${COLOR_DIM}(duplicate target conflict: ${target_name})${COLOR_RESET}"
+                TOTAL_SKIPPED_COUNT=$((TOTAL_SKIPPED_COUNT + 1))
+                continue
             fi
-        fi
 
-        local candidate_target="${target_dir}/${target_name}"
+            if [ "${candidate_target}" != "${file}" ] && [ -e "${candidate_target}" ]; then
+                echo -e "  ${COLOR_RED}✖${COLOR_RESET} ${bname} ${COLOR_DIM}(target file '${target_name}' already exists in folder)${COLOR_RESET}"
+                TOTAL_SKIPPED_COUNT=$((TOTAL_SKIPPED_COUNT + 1))
+                continue
+            fi
+        else
+            # Determine target directory (preserve relative subfolders if recursive)
+            local target_dir="${OUTPUT_DIR}"
+            if [ "${RECURSIVE}" = true ] && [ -z "${SPECIFIC_FILE}" ]; then
+                local rel_path="${file#"${clean_input_prefix}"}"
+                local rel_dir
+                rel_dir=$(dirname "${rel_path}")
+                if [ "${rel_dir}" != "." ]; then
+                    target_dir="${OUTPUT_DIR}/${rel_dir}"
+                fi
+            fi
 
-        if [[ -n "${seen_targets[${candidate_target}]:-}" ]] || [ -e "${candidate_target}" ]; then
-            local ext_clean
-            ext_clean=$(echo "${orig_ext}" | tr '[:upper:]' '[:lower:]')
-            target_name="${stem}_${ext_clean}_transcoded.mov"
             candidate_target="${target_dir}/${target_name}"
 
-            local counter=1
-            while true; do
-                if [[ -z "${seen_targets[${candidate_target}]:-}" ]] && [ ! -e "${candidate_target}" ]; then
-                    break
-                fi
-                target_name="${stem}_${counter}_transcoded.mov"
+            if [[ -n "${seen_targets[${candidate_target}]:-}" ]] || [ -e "${candidate_target}" ]; then
+                local ext_clean
+                ext_clean=$(echo "${orig_ext}" | tr '[:upper:]' '[:lower:]')
+                target_name="${stem}_${ext_clean}_transcoded.mov"
                 candidate_target="${target_dir}/${target_name}"
-                counter=$((counter + 1))
-            done
+
+                local counter=1
+                while true; do
+                    if [[ -z "${seen_targets[${candidate_target}]:-}" ]] && [ ! -e "${candidate_target}" ]; then
+                        break
+                    fi
+                    target_name="${stem}_${counter}_transcoded.mov"
+                    candidate_target="${target_dir}/${target_name}"
+                    counter=$((counter + 1))
+                done
+            fi
         fi
         seen_targets["${candidate_target}"]=1
+
+        local file_size
+        file_size=$(stat -c%s "${file}" 2>/dev/null || wc -c < "${file}")
+        file_size="${file_size//[!0-9]/}"
 
         local dur_float="${duration:-0}"
         TOTAL_DURATION_SEC=$(awk -v t="${TOTAL_DURATION_SEC}" -v d="${dur_float}" 'BEGIN {printf "%.6f", t + d}')
@@ -642,6 +722,7 @@ inspect_and_validate_files() {
         VALID_IS_HDR+=("${is_hdr}")
         VALID_HAS_AUDIO+=("${has_audio}")
         VALID_TARGET_PATHS+=("${candidate_target}")
+        VALID_ORIG_SIZES+=("${file_size:-0}")
     done
 
     echo ""
@@ -661,33 +742,74 @@ check_disk_space() {
         rate_bps="${H264_BYTE_RATE}"
     fi
 
-    local estimated_bytes
-    estimated_bytes=$(
-        for i in "${!VALID_FILES[@]}"; do
-            printf '%s\t%s\t%s\n' "${VALID_DURATIONS[$i]}" "${VALID_WIDTHS[$i]}" "${VALID_HEIGHTS[$i]}"
-        done | awk -F'\t' -v base="${rate_bps}" -v fps="${TARGET_FPS}" '
-        {
-            dur = $1 + 0
-            w = $2 + 0
-            h = $3 + 0
-            if (w <= 0 || h <= 0) {
-                w = 1920
-                h = 1080
+    local estimated_bytes=0
+    local required_bytes=0
+
+    if [ "${OVERWRITE}" = true ]; then
+        read -r estimated_bytes required_bytes < <(
+            for i in "${!VALID_FILES[@]}"; do
+                printf '%s\t%s\t%s\t%s\n' "${VALID_DURATIONS[$i]}" "${VALID_WIDTHS[$i]}" "${VALID_HEIGHTS[$i]}" "${VALID_ORIG_SIZES[$i]}"
+            done | awk -F'\t' -v base="${rate_bps}" -v fps="${TARGET_FPS}" -v margin_num="${DISK_SAFETY_MARGIN_NUM}" -v margin_den="${DISK_SAFETY_MARGIN_DEN}" '
+            {
+                dur = $1 + 0
+                w = $2 + 0
+                h = $3 + 0
+                orig = $4 + 0
+                if (w <= 0 || h <= 0) {
+                    w = 1920
+                    h = 1080
+                }
+                res_factor = (w * h) / (1920.0 * 1080.0)
+                fps_factor = (fps > 0 ? fps : 30.0) / 30.0
+                clip_bytes = dur * base * res_factor * fps_factor
+                total_bytes += clip_bytes
+
+                needed = cum_delta + clip_bytes
+                if (needed > peak_needed) {
+                    peak_needed = needed
+                }
+                cum_delta += (clip_bytes - orig)
             }
-            res_factor = (w * h) / (1920.0 * 1080.0)
-            fps_factor = (fps > 0 ? fps : 30.0) / 30.0
-            clip_bytes = dur * base * res_factor * fps_factor
-            total += clip_bytes
-        }
-        END {
-            printf "%.0f", total
-        }'
-    )
+            END {
+                if (peak_needed < 0) peak_needed = 0
+                req = (peak_needed * margin_num) / margin_den
+                printf "%.0f %.0f\n", total_bytes, req
+            }'
+        ) || true
+    else
+        estimated_bytes=$(
+            for i in "${!VALID_FILES[@]}"; do
+                printf '%s\t%s\t%s\n' "${VALID_DURATIONS[$i]}" "${VALID_WIDTHS[$i]}" "${VALID_HEIGHTS[$i]}"
+            done | awk -F'\t' -v base="${rate_bps}" -v fps="${TARGET_FPS}" '
+            {
+                dur = $1 + 0
+                w = $2 + 0
+                h = $3 + 0
+                if (w <= 0 || h <= 0) {
+                    w = 1920
+                    h = 1080
+                }
+                res_factor = (w * h) / (1920.0 * 1080.0)
+                fps_factor = (fps > 0 ? fps : 30.0) / 30.0
+                clip_bytes = dur * base * res_factor * fps_factor
+                total += clip_bytes
+            }
+            END {
+                printf "%.0f", total
+            }'
+        )
+        if [[ ! "${estimated_bytes}" =~ ^[0-9]+$ ]]; then
+            estimated_bytes=0
+        fi
+        required_bytes=$(( (estimated_bytes * DISK_SAFETY_MARGIN_NUM) / DISK_SAFETY_MARGIN_DEN ))
+    fi
+
     if [[ ! "${estimated_bytes}" =~ ^[0-9]+$ ]]; then
         estimated_bytes=0
     fi
-
-    local required_bytes=$(( (estimated_bytes * DISK_SAFETY_MARGIN_NUM) / DISK_SAFETY_MARGIN_DEN ))
+    if [[ ! "${required_bytes}" =~ ^[0-9]+$ ]]; then
+        required_bytes=0
+    fi
 
     local check_dir="${OUTPUT_DIR}"
     while [ ! -d "${check_dir}" ]; do
@@ -699,7 +821,7 @@ check_disk_space() {
         check_dir="${parent}"
     done
 
-    if [ "${DRY_RUN}" = false ]; then
+    if [ "${DRY_RUN}" = false ] && [ "${OVERWRITE}" = false ]; then
         mkdir -p "${OUTPUT_DIR}"
     fi
 
@@ -722,14 +844,23 @@ check_disk_space() {
 
     echo -e "${COLOR_BOLD}Disk space check${COLOR_RESET}"
     echo -e "  ${COLOR_DIM}Duration to convert       :${COLOR_RESET} ${dur_formatted}"
-    echo -e "  ${COLOR_DIM}Estimated output size     :${COLOR_RESET} ${est_formatted}"
-    echo -e "  ${COLOR_DIM}Required (+20% safety)    :${COLOR_RESET} ${req_formatted}"
+    if [ "${OVERWRITE}" = true ]; then
+        echo -e "  ${COLOR_DIM}Estimated output total    :${COLOR_RESET} ${est_formatted}"
+        echo -e "  ${COLOR_DIM}Peak required (+20%)      :${COLOR_RESET} ${req_formatted} (in-place replacement)"
+    else
+        echo -e "  ${COLOR_DIM}Estimated output size     :${COLOR_RESET} ${est_formatted}"
+        echo -e "  ${COLOR_DIM}Required (+20% safety)    :${COLOR_RESET} ${req_formatted}"
+    fi
     echo -e "  ${COLOR_DIM}Available                 :${COLOR_RESET} ${avail_formatted} (partition of ${partition_ref})"
 
     if [ "${avail_bytes}" -lt "${required_bytes}" ]; then
         echo -e "${COLOR_RED}✖ Insufficient disk space!${COLOR_RESET}" >&2
         echo -e "  Available: ${avail_formatted}, but at least ${req_formatted} is required (+20% safety margin to prevent disk exhaustion).${COLOR_RESET}" >&2
-        echo -e "  Free up space or choose another destination folder with ${COLOR_CYAN}-o|--output${COLOR_RESET}." >&2
+        if [ "${OVERWRITE}" = false ]; then
+            echo -e "  Free up space or choose another destination folder with ${COLOR_CYAN}-o|--output${COLOR_RESET}." >&2
+        else
+            echo -e "  Free up space before running in-place conversion.${COLOR_RESET}" >&2
+        fi
         exit 1
     fi
 
@@ -876,9 +1007,17 @@ convert_files() {
 
         FFMPEG_PID=""
 
-        if [ -f "${partial_target}" ]; then
-            mv "${partial_target}" "${final_target}"
-            CURRENT_PARTIAL=""
+        if [ -s "${partial_target}" ]; then
+            if [ "${OVERWRITE}" = true ]; then
+                mv -f "${partial_target}" "${final_target}"
+                CURRENT_PARTIAL=""
+                if [ "${src_file}" != "${final_target}" ] && [ -f "${src_file}" ]; then
+                    rm -f "${src_file}"
+                fi
+            else
+                mv "${partial_target}" "${final_target}"
+                CURRENT_PARTIAL=""
+            fi
             local file_size
             file_size=$(stat -c%s "${final_target}" 2>/dev/null || wc -c < "${final_target}")
             file_size="${file_size//[!0-9]/}"
@@ -897,10 +1036,18 @@ convert_files() {
             clip_dur_str=$(format_duration "${clip_duration}")
 
             printf "      progress 100%% · elapsed %s · speed=%s\r" "${clip_dur_str}" "${speed}"
-            echo -e "\n      ${COLOR_GREEN}✔ Completed${COLOR_RESET} in ${clip_dur_str} ${COLOR_DIM}(size: ${size_str})${COLOR_RESET}"
+            if [ "${OVERWRITE}" = true ]; then
+                local orig_size="${VALID_ORIG_SIZES[$i]}"
+                local orig_size_str
+                orig_size_str=$(format_bytes "${orig_size}")
+                echo -e "\n      ${COLOR_GREEN}✔ Replaced${COLOR_RESET} in ${clip_dur_str} ${COLOR_DIM}(${orig_size_str} → ${size_str})${COLOR_RESET}"
+            else
+                echo -e "\n      ${COLOR_GREEN}✔ Completed${COLOR_RESET} in ${clip_dur_str} ${COLOR_DIM}(size: ${size_str})${COLOR_RESET}"
+            fi
             CONVERTED_COUNT=$((CONVERTED_COUNT + 1))
         else
-            echo -e "      ${COLOR_RED}✖ Error: output file not found.${COLOR_RESET}" >&2
+            echo -e "      ${COLOR_RED}✖ Error: output file not found or empty.${COLOR_RESET}" >&2
+            cleanup_partial
             FAILED_COUNT=$((FAILED_COUNT + 1))
         fi
         echo ""
@@ -929,22 +1076,45 @@ print_summary_and_notify() {
     echo -e "  ${COLOR_BOLD}Processing Summary${COLOR_RESET}"
     echo -e "${COLOR_BLUE}──────────────────────────────────────────────────────────────────────────────${COLOR_RESET}"
     echo -e "  ${COLOR_DIM}Total files analyzed       :${COLOR_RESET} ${TOTAL_SCANNED_COUNT}"
-    echo -e "  ${COLOR_DIM}Successfully converted     :${COLOR_RESET} ${COLOR_GREEN}${COLOR_BOLD}${CONVERTED_COUNT}${COLOR_RESET}"
+    if [ "${OVERWRITE}" = true ]; then
+        echo -e "  ${COLOR_DIM}Successfully replaced      :${COLOR_RESET} ${COLOR_GREEN}${COLOR_BOLD}${CONVERTED_COUNT}${COLOR_RESET}"
+    else
+        echo -e "  ${COLOR_DIM}Successfully converted     :${COLOR_RESET} ${COLOR_GREEN}${COLOR_BOLD}${CONVERTED_COUNT}${COLOR_RESET}"
+    fi
     if [ "${total_failed}" -gt 0 ]; then
         echo -e "  ${COLOR_DIM}Failed / Skipped           :${COLOR_RESET} ${COLOR_YELLOW}${total_failed}${COLOR_RESET}"
     else
         echo -e "  ${COLOR_DIM}Failed / Skipped           :${COLOR_RESET} 0"
     fi
-    echo -e "  ${COLOR_DIM}Disk space used            :${COLOR_RESET} ${size_formatted}"
+    if [ "${OVERWRITE}" = true ]; then
+        local total_orig_size=0
+        for s in "${VALID_ORIG_SIZES[@]:-}"; do
+            total_orig_size=$((total_orig_size + s))
+        done
+        local orig_total_formatted
+        orig_total_formatted=$(format_bytes "${total_orig_size}")
+        echo -e "  ${COLOR_DIM}Original total size        :${COLOR_RESET} ${orig_total_formatted}"
+        echo -e "  ${COLOR_DIM}Final total size           :${COLOR_RESET} ${size_formatted}"
+    else
+        echo -e "  ${COLOR_DIM}Disk space used            :${COLOR_RESET} ${size_formatted}"
+    fi
     echo -e "  ${COLOR_DIM}Total time elapsed         :${COLOR_RESET} ${time_formatted}"
     echo -e "${COLOR_BLUE}──────────────────────────────────────────────────────────────────────────────${COLOR_RESET}"
-    echo -e "  ${COLOR_DIM}Destination:${COLOR_RESET} ${OUTPUT_DIR}"
+    if [ "${OVERWRITE}" = true ]; then
+        echo -e "  ${COLOR_DIM}Mode                       :${COLOR_RESET} In-place overwrite (originals replaced)"
+    else
+        echo -e "  ${COLOR_DIM}Destination                :${COLOR_RESET} ${OUTPUT_DIR}"
+    fi
     echo -e "${COLOR_BLUE}──────────────────────────────────────────────────────────────────────────────${COLOR_RESET}"
     echo ""
 
     if command -v notify-send >/dev/null 2>&1; then
         local notify_title="Video Transcoder"
-        local notify_msg="${CONVERTED_COUNT} videos successfully converted in ${time_formatted} (${size_formatted})."
+        local action_word="converted"
+        if [ "${OVERWRITE}" = true ]; then
+            action_word="replaced in-place"
+        fi
+        local notify_msg="${CONVERTED_COUNT} videos successfully ${action_word} in ${time_formatted} (${size_formatted})."
         if [ "${FAILED_COUNT}" -gt 0 ]; then
             notify_msg="${CONVERTED_COUNT} succeeded, ${FAILED_COUNT} failed in ${time_formatted}."
             notify-send -i "dialog-warning" -a "Video Transcoder" "${notify_title}" "${notify_msg}" 2>/dev/null || true
