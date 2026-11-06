@@ -167,6 +167,9 @@ EOF
 format_duration() {
     local total_seconds
     total_seconds=$(awk -v s="${1:-0}" 'BEGIN {printf "%.0f", s}')
+    if [[ ! "${total_seconds}" =~ ^[0-9]+$ ]]; then
+        total_seconds=0
+    fi
     local hours=$((total_seconds / 3600))
     local minutes=$(((total_seconds % 3600) / 60))
     local seconds=$((total_seconds % 60))
@@ -680,6 +683,9 @@ check_disk_space() {
             printf "%.0f", total
         }'
     )
+    if [[ ! "${estimated_bytes}" =~ ^[0-9]+$ ]]; then
+        estimated_bytes=0
+    fi
 
     local required_bytes=$(( (estimated_bytes * DISK_SAFETY_MARGIN_NUM) / DISK_SAFETY_MARGIN_DEN ))
 
@@ -699,6 +705,9 @@ check_disk_space() {
 
     local avail_bytes
     avail_bytes=$(df -PB 1 "${check_dir}" | awk 'NR==2 {print $4}')
+    if [[ ! "${avail_bytes}" =~ ^[0-9]+$ ]]; then
+        avail_bytes=0
+    fi
 
     local dur_formatted
     dur_formatted=$(format_duration "${TOTAL_DURATION_SEC}")
@@ -759,6 +768,9 @@ convert_files() {
         local dur_float="${VALID_DURATIONS[$i]}"
         local dur_total_us
         dur_total_us=$(awk -v d="${dur_float}" 'BEGIN {printf "%.0f", d * 1000000}')
+        if [[ ! "${dur_total_us}" =~ ^[0-9]+$ ]]; then
+            dur_total_us=0
+        fi
         local is_hdr="${VALID_IS_HDR[$i]}"
         local has_audio="${VALID_HAS_AUDIO[$i]}"
         local res_desc="${VALID_RES_STRS[$i]}"
@@ -810,8 +822,10 @@ convert_files() {
 
         while IFS='=' read -u 3 -r key val; do
             case "${key}" in
-                out_time_us)
-                    out_time_us="${val}"
+                out_time_us|out_time_ms)
+                    if [[ "${val}" =~ ^[0-9]+$ ]]; then
+                        out_time_us="${val}"
+                    fi
                     ;;
                 speed)
                     speed="${val#"${val%%[![:space:]]*}"}"
@@ -833,9 +847,8 @@ convert_files() {
                     fi
 
                     local eta_str="00:00:00"
-                    local speed_num
-                    speed_num=$(echo "${speed}" | sed 's/x//' | tr -d ' ')
-                    if awk -v s="${speed_num}" 'BEGIN {exit !(s > 0.05)}' 2>/dev/null && [ "${dur_total_us}" -gt "${out_time_us}" ]; then
+                    local speed_num="${speed//[ x]/}"
+                    if [[ "${speed_num}" =~ ^[0-9]*\.?[0-9]+$ ]] && awk -v s="${speed_num}" 'BEGIN {exit !((s + 0) > 0.05)}' 2>/dev/null && [ "${dur_total_us}" -gt "${out_time_us}" ]; then
                         local rem_us=$((dur_total_us - out_time_us))
                         local rem_sec
                         rem_sec=$(awk -v r="${rem_us}" -v s="${speed_num}" 'BEGIN {printf "%.0f", (r / 1000000) / s}')
@@ -868,7 +881,12 @@ convert_files() {
             CURRENT_PARTIAL=""
             local file_size
             file_size=$(stat -c%s "${final_target}" 2>/dev/null || wc -c < "${final_target}")
-            TOTAL_CONVERTED_SIZE=$((TOTAL_CONVERTED_SIZE + file_size))
+            file_size="${file_size//[!0-9]/}"
+            if [ -n "${file_size}" ]; then
+                TOTAL_CONVERTED_SIZE=$((TOTAL_CONVERTED_SIZE + file_size))
+            else
+                file_size=0
+            fi
             local size_str
             size_str=$(format_bytes "${file_size}")
 
