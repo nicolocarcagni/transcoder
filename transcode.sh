@@ -526,7 +526,7 @@ inspect_and_validate_files() {
 
         local probe_v
         if ! probe_v=$(ffprobe -v error -select_streams v:0 \
-            -show_entries stream=codec_name,width,height,r_frame_rate,avg_frame_rate,pix_fmt,color_space,color_transfer,color_primaries \
+            -show_entries stream=codec_name,width,height,r_frame_rate,avg_frame_rate,color_space,color_transfer,color_primaries \
             -show_entries format=duration \
             -of default=noprint_wrappers=1 "${file}" 2>&1); then
             echo -e "  ${COLOR_RED}✖${COLOR_RESET} ${bname} ${COLOR_DIM}(invalid or corrupted video stream)${COLOR_RESET}"
@@ -534,7 +534,7 @@ inspect_and_validate_files() {
             continue
         fi
 
-        local codec_name="" width="" height="" r_fps="" avg_fps="" pix_fmt="" c_space="" c_trc="" c_prim="" duration=""
+        local codec_name="" width="" height="" r_fps="" avg_fps="" c_space="" c_trc="" c_prim="" duration=""
         while IFS='=' read -r key val; do
             case "${key}" in
                 codec_name) codec_name="${val}" ;;
@@ -542,7 +542,6 @@ inspect_and_validate_files() {
                 height) height="${val}" ;;
                 r_frame_rate) r_fps="${val}" ;;
                 avg_frame_rate) avg_fps="${val}" ;;
-                pix_fmt) pix_fmt="${val}" ;;
                 color_space) c_space="${val}" ;;
                 color_transfer) c_trc="${val}" ;;
                 color_primaries) c_prim="${val}" ;;
@@ -815,7 +814,7 @@ convert_files() {
                     out_time_us="${val}"
                     ;;
                 speed)
-                    speed=$(echo "${val}" | sed 's/^[ \t]*//')
+                    speed="${val#"${val%%[![:space:]]*}"}"
                     ;;
                 progress)
                     if [ "${val}" = "end" ]; then
