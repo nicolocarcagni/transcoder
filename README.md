@@ -140,10 +140,11 @@ cp transcode.sh ~/.local/bin/transcoder
 
 ### Interactive Mode
 Simply run `transcoder` (or `./transcode.sh`) without arguments. You will be prompted to select:
-1. Source folder or video file
+1. Source folder or video file (supports direct drag-and-drop from file managers with single/double quotes `' '`, tilde `~` expansion, and relative/absolute paths)
 2. Recursive directory scan (if subfolders are present)
 3. Target codec (ProRes 422 LT or H.264 All-Intra)
 4. Target framerate (30 or 60 fps)
+5. Destination mode (save to subfolder `transcoded/` or safe in-place overwrite)
 
 ```bash
 transcoder

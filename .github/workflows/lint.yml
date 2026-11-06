@@ -20,6 +20,7 @@ jobs:
       - name: Verify Bash Syntax
         run: |
           bash -n transcode.sh
+          bash -n tests/test_path_handling.sh
 
       - name: Run ShellCheck
         uses: ludeeus/action-shellcheck@2.0.0

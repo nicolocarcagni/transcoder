@@ -228,14 +228,77 @@ print_banner() {
     echo ""
 }
 
+clean_input_path() {
+    local p="${1:-}"
+
+    # Trim leading and trailing whitespace
+    p="${p#"${p%%[![:space:]]*}"}"
+    p="${p%"${p##*[![:space:]]}"}"
+
+    # Strip surrounding single or double quotes (e.g. from terminal drag-and-drop or copy-paste)
+    while [ -n "${p}" ]; do
+        if [[ "${p}" == \'*\' ]]; then
+            p="${p#\'}"
+            p="${p%\'}"
+        elif [[ "${p}" == \"*\" ]]; then
+            p="${p#\"}"
+            p="${p%\"}"
+        else
+            break
+        fi
+    done
+
+    # Trim leading and trailing whitespace again if inner padding existed
+    p="${p#"${p%%[![:space:]]*}"}"
+    p="${p%"${p##*[![:space:]]}"}"
+
+    # Strip file:// URI prefix if present (including optional localhost authority)
+    if [[ "${p}" == file://* ]]; then
+        p="${p#file://}"
+        p="${p#localhost}"
+    fi
+
+    # Expand tilde ~ to user HOME directory safely
+    if [ "${p}" = "~" ]; then
+        p="${HOME:-~}"
+    elif [[ "${p}" == "~/"* ]]; then
+        p="${HOME:-~}/${p#"~/"}"
+    fi
+
+    # Strip trailing slashes (unless path is root "/")
+    while [ "${p}" != "/" ] && [[ "${p}" == */ ]]; do
+        p="${p%/}"
+    done
+
+    # If path does not exist as-is, check if URL percent-decoding or backslash unescaping resolves it
+    if [ ! -e "${p}" ]; then
+        if [[ "${p}" =~ %[0-9A-Fa-f]{2} ]]; then
+            local decoded
+            decoded=$(printf '%b' "${p//%/\\x}" 2>/dev/null || true)
+            if [ -e "${decoded}" ]; then
+                p="${decoded}"
+            fi
+        fi
+        if [ ! -e "${p}" ] && [[ "${p}" == *\\* ]]; then
+            local unescaped
+            unescaped=$(sed 's/\\\(.\)/\1/g' <<< "${p}")
+            if [ -e "${unescaped}" ]; then
+                p="${unescaped}"
+            fi
+        fi
+    fi
+
+    printf '%s' "${p}"
+}
+
 run_interactive_mode() {
     echo -e "${COLOR_CYAN}${COLOR_BOLD}Welcome to Video Transcoder!${COLOR_RESET}"
     echo ""
 
     local input_prompt=""
     read -r -e -p "Enter source directory or video file [default: .]: " input_prompt
+    input_prompt=$(clean_input_path "${input_prompt}")
     input_prompt="${input_prompt:-.}"
-    input_prompt="${input_prompt/#\~/$HOME}"
 
     if [ -d "${input_prompt}" ]; then
         INPUT_DIR="${input_prompt}"
@@ -365,8 +428,8 @@ parse_arguments() {
                     echo -e "${COLOR_RED}[ERROR] Multiple input paths provided. Only one input path is allowed.${COLOR_RESET}" >&2
                     exit 1
                 fi
-                local in_arg="$2"
-                in_arg="${in_arg/#\~/$HOME}"
+                local in_arg
+                in_arg=$(clean_input_path "$2")
                 if [ -d "${in_arg}" ]; then
                     INPUT_DIR="${in_arg}"
                     SPECIFIC_FILE=""
@@ -374,7 +437,7 @@ parse_arguments() {
                     SPECIFIC_FILE="${in_arg}"
                     INPUT_DIR=$(dirname "${in_arg}")
                 else
-                    echo -e "${COLOR_RED}[ERROR] Input path does not exist: '$2'.${COLOR_RESET}" >&2
+                    echo -e "${COLOR_RED}[ERROR] Input path does not exist: '${in_arg}'.${COLOR_RESET}" >&2
                     exit 1
                 fi
                 INPUT_ALREADY_SET=true
@@ -389,8 +452,7 @@ parse_arguments() {
                     echo -e "${COLOR_RED}[ERROR] Options --overwrite and --output cannot be used together.${COLOR_RESET}" >&2
                     exit 1
                 fi
-                OUTPUT_DIR="$2"
-                OUTPUT_DIR="${OUTPUT_DIR/#\~/$HOME}"
+                OUTPUT_DIR=$(clean_input_path "$2")
                 OUTPUT_DIR_EXPLICIT=true
                 shift 2
                 ;;
@@ -421,8 +483,8 @@ parse_arguments() {
                         echo -e "${COLOR_RED}[ERROR] Multiple input arguments provided. Only one input path is allowed.${COLOR_RESET}" >&2
                         exit 1
                     fi
-                    local pos_arg="$1"
-                    pos_arg="${pos_arg/#\~/$HOME}"
+                    local pos_arg
+                    pos_arg=$(clean_input_path "$1")
                     if [ -d "${pos_arg}" ]; then
                         INPUT_DIR="${pos_arg}"
                         SPECIFIC_FILE=""
@@ -430,7 +492,7 @@ parse_arguments() {
                         SPECIFIC_FILE="${pos_arg}"
                         INPUT_DIR=$(dirname "${pos_arg}")
                     else
-                        echo -e "${COLOR_RED}[ERROR] Target path does not exist: '$1'.${COLOR_RESET}" >&2
+                        echo -e "${COLOR_RED}[ERROR] Target path does not exist: '${pos_arg}'.${COLOR_RESET}" >&2
                         exit 1
                     fi
                     INPUT_ALREADY_SET=true
@@ -452,8 +514,8 @@ parse_arguments() {
                     echo -e "${COLOR_RED}[ERROR] Multiple input arguments provided ('$1' received, but input already set).${COLOR_RESET}" >&2
                     exit 1
                 fi
-                local pos_arg="$1"
-                pos_arg="${pos_arg/#\~/$HOME}"
+                local pos_arg
+                pos_arg=$(clean_input_path "$1")
                 if [ -d "${pos_arg}" ]; then
                     INPUT_DIR="${pos_arg}"
                     SPECIFIC_FILE=""
@@ -461,7 +523,7 @@ parse_arguments() {
                     SPECIFIC_FILE="${pos_arg}"
                     INPUT_DIR=$(dirname "${pos_arg}")
                 else
-                    echo -e "${COLOR_RED}[ERROR] Target path does not exist: '$1'.${COLOR_RESET}" >&2
+                    echo -e "${COLOR_RED}[ERROR] Target path does not exist: '${pos_arg}'.${COLOR_RESET}" >&2
                     exit 1
                 fi
                 INPUT_ALREADY_SET=true
@@ -1149,4 +1211,6 @@ main() {
     print_summary_and_notify "${global_start_time}"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
