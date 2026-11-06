@@ -1,0 +1,21 @@
+# Local test media and benchmarks
+.testmedia/
+*.log
+
+# Transcoder output folders and partial files
+transcoded/
+*_kdenlive/
+*.part.mov
+*_transcoded.mov
+.transcoder_tmp.*/
+
+# Temporary and editor files
+*~
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# IDE and Editor directories
+.vscode/
+.idea/
