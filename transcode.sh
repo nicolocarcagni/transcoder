@@ -261,8 +261,8 @@ clean_input_path() {
     # Expand tilde ~ to user HOME directory safely
     if [ "${p}" = "~" ]; then
         p="${HOME:-~}"
-    elif [[ "${p}" == "~/"* ]]; then
-        p="${HOME:-~}/${p#"~/"}"
+    elif [[ "${p}" == \~/* ]]; then
+        p="${HOME:-~}/${p#\~/}"
     fi
 
     # Strip trailing slashes (unless path is root "/")
@@ -281,6 +281,7 @@ clean_input_path() {
         fi
         if [ ! -e "${p}" ] && [[ "${p}" == *\\* ]]; then
             local unescaped
+            # shellcheck disable=SC2001
             unescaped=$(sed 's/\\\(.\)/\1/g' <<< "${p}")
             if [ -e "${unescaped}" ]; then
                 p="${unescaped}"

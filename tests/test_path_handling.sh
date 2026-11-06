@@ -49,10 +49,7 @@ source "${TRANSCODER}"
 
 # Setup self-contained ephemeral test fixtures
 TMP_FIXTURE_DIR=$(mktemp -d "/tmp/transcoder_test_fixture.XXXXXX")
-cleanup_fixtures() {
-    rm -rf "${TMP_FIXTURE_DIR}"
-}
-trap cleanup_fixtures EXIT
+trap 'rm -rf "${TMP_FIXTURE_DIR}"' EXIT
 
 TEST_DIR="${TMP_FIXTURE_DIR}/in put (test)"
 mkdir -p "${TEST_DIR}"
