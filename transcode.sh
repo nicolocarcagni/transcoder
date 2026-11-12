@@ -33,8 +33,10 @@ readonly DISK_SAFETY_MARGIN_DEN=10
 
 readonly DEFAULT_OUTPUT_FOLDER_NAME="transcoded"
 
-FORMAT="prores"
+FORMAT="h264"
 TARGET_FPS="30"
+TONEMAP_ALGO="hable"
+NPL_VAL="100"
 INPUT_DIR="."
 SPECIFIC_FILE=""
 OUTPUT_DIR=""
@@ -111,12 +113,48 @@ check_dependencies() {
         echo -e "${COLOR_RED}${COLOR_BOLD}[ERROR] Missing required dependencies: ${missing[*]}${COLOR_RESET}" >&2
         echo -e "${COLOR_YELLOW}To install them on Fedora Linux, run the following DNF commands:${COLOR_RESET}" >&2
         echo "" >&2
-        echo -e "  ${COLOR_CYAN}# 1. Enable RPM Fusion repositories (if not already enabled for full FFmpeg):${COLOR_RESET}" >&2
+        echo -e "  ${COLOR_CYAN}# 1. Enable RPM Fusion repositories (Free & Non-Free):${COLOR_RESET}" >&2
         echo -e "  sudo dnf install -y https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-\$(rpm -E %fedora).noarch.rpm \\" >&2
         echo -e "                      https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-\$(rpm -E %fedora).noarch.rpm" >&2
         echo "" >&2
-        echo -e "  ${COLOR_CYAN}# 2. Install FFmpeg, Coreutils, Gawk and desktop notification tools:${COLOR_RESET}" >&2
-        echo -e "  sudo dnf install -y ffmpeg coreutils gawk libnotify" >&2
+        echo -e "  ${COLOR_CYAN}# 2. Swap ffmpeg-free with full FFmpeg from RPM Fusion and install utilities:${COLOR_RESET}" >&2
+        echo -e "  sudo dnf swap -y ffmpeg-free ffmpeg --allowerasing" >&2
+        echo -e "  sudo dnf install -y ffmpeg libzimg coreutils gawk libnotify" >&2
+        echo "" >&2
+        exit 1
+    fi
+
+    # Pre-flight check on FFmpeg capabilities: libx264 encoder, zscale and tonemap filters
+    local ffmpeg_encoders
+    ffmpeg_encoders=$(ffmpeg -encoders 2>/dev/null || true)
+    local ffmpeg_filters
+    ffmpeg_filters=$(ffmpeg -filters 2>/dev/null || true)
+
+    local missing_features=()
+    if ! grep -qw "libx264" <<< "${ffmpeg_encoders}"; then
+        missing_features+=("encoder 'libx264'")
+    fi
+    if ! grep -qw "zscale" <<< "${ffmpeg_filters}"; then
+        missing_features+=("filter 'zscale' (requires libzimg)")
+    fi
+    if ! grep -qw "tonemap" <<< "${ffmpeg_filters}"; then
+        missing_features+=("filter 'tonemap'")
+    fi
+
+    if [ ${#missing_features[@]} -gt 0 ]; then
+        echo -e "${COLOR_RED}${COLOR_BOLD}[ERROR] Installed FFmpeg build lacks required capabilities: ${missing_features[*]}${COLOR_RESET}" >&2
+        echo -e "${COLOR_YELLOW}On Fedora Linux, the default 'ffmpeg-free' package strips H.264 encoding and tone-mapping filters.${COLOR_RESET}" >&2
+        echo -e "${COLOR_YELLOW}To replace it with the complete FFmpeg build from RPM Fusion, run:${COLOR_RESET}" >&2
+        echo "" >&2
+        echo -e "  ${COLOR_CYAN}# 1. Enable RPM Fusion repositories (Free and Non-Free):${COLOR_RESET}" >&2
+        echo -e "  sudo dnf install -y https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-\$(rpm -E %fedora).noarch.rpm \\" >&2
+        echo -e "                      https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-\$(rpm -E %fedora).noarch.rpm" >&2
+        echo "" >&2
+        echo -e "  ${COLOR_CYAN}# 2. Replace stripped ffmpeg-free with full FFmpeg:${COLOR_RESET}" >&2
+        echo -e "  sudo dnf swap -y ffmpeg-free ffmpeg --allowerasing" >&2
+        echo "" >&2
+        echo -e "  ${COLOR_CYAN}# 3. Ensure libzimg (required for zscale) is installed:${COLOR_RESET}" >&2
+        echo -e "  sudo dnf install -y libzimg" >&2
         echo "" >&2
         exit 1
     fi
@@ -126,17 +164,21 @@ show_help() {
     cat <<EOF
 ${COLOR_BOLD}Usage:${COLOR_RESET} $(basename "$0") [OPTIONS] [INPUT_DIR|FILE]
 
-Production-grade transcode script to normalize video recordings
-(VFR, HDR HLG/Dolby Vision) into stable editing formats (Apple ProRes / H.264 All-Intra).
+Production-grade transcode script to normalize video recordings (iPhone VFR, HDR HLG/Dolby Vision)
+into editing-friendly H.264 All-Intra or Apple ProRes 422 LT for Kdenlive on Fedora Linux.
 
 ${COLOR_BOLD}ARGUMENTS:${COLOR_RESET}
   INPUT_DIR|FILE           Source directory or video file to process
                            (Default: current directory)
 
 ${COLOR_BOLD}OPTIONS:${COLOR_RESET}
-  -f, --format FORMAT      Output codec: ${COLOR_CYAN}prores${COLOR_RESET} (Apple ProRes 422 LT) or ${COLOR_CYAN}h264${COLOR_RESET} (All-Intra)
-                           (Default: prores)
+  -f, --format FORMAT      Output codec: ${COLOR_CYAN}h264${COLOR_RESET} (All-Intra) or ${COLOR_CYAN}prores${COLOR_RESET} (Apple ProRes 422 LT)
+                           (Default: h264)
   -r, --fps FPS            Constant target framerate (CFR): ${COLOR_CYAN}30${COLOR_RESET} or ${COLOR_CYAN}60${COLOR_RESET} (Default: 30)
+      --tonemap ALGO       HDR tone-mapping algorithm: ${COLOR_CYAN}hable${COLOR_RESET}, ${COLOR_CYAN}mobius${COLOR_RESET}, or ${COLOR_CYAN}reinhard${COLOR_RESET}
+                           (Default: hable)
+      --npl NITS           Nominal Peak Luminance in nits for HDR tone-mapping
+                           (Default: 100)
   -i, --input DIR|FILE     Source directory or video file (alternative to positional argument)
   -o, --output DIR         Destination directory for converted videos
                            (Default: <input>/${DEFAULT_OUTPUT_FOLDER_NAME})
@@ -151,20 +193,23 @@ ${COLOR_BOLD}EXAMPLES:${COLOR_RESET}
   # Interactive mode
   $(basename "$0")
 
-  # Process an entire folder passed directly as positional argument
+  # Transcode current directory or specific folder to H.264 All-Intra (default)
   $(basename "$0") ~/Videos/iPhone
 
-  # Process folder with options and save to custom destination
-  $(basename "$0") ~/Videos/iPhone -f prores -r 30 -o ~/Videos/Transcoded_Clips
+  # Custom tone-mapping algorithm and NPL for HDR footage
+  $(basename "$0") ~/Videos/iPhone --tonemap mobius --npl 120
 
-  # Process folder and replace original files in-place one-by-one safely
+  # Convert with 60 fps target framerate to a custom output folder
+  $(basename "$0") ~/Videos/iPhone -r 60 -o ~/Videos/Transcoded_Clips
+
+  # In-place overwrite mode (replaces original files safely one-by-one)
   $(basename "$0") ~/Videos/iPhone -w
 
-  # Process an entire folder recursively
+  # Recursively process folder structure
   $(basename "$0") ~/Videos/iPhone -R
 
-  # Convert a single video file in-place
-  $(basename "$0") clip.mov -w
+  # Convert a single video file
+  $(basename "$0") clip.mov
 
   # Dry-run validation
   $(basename "$0") "./raw_footage" -d
@@ -202,11 +247,11 @@ print_banner() {
 
     echo ""
     echo -e "${COLOR_BLUE}──────────────────────────────────────────────────────────────────────────────${COLOR_RESET}"
-    echo -e "  ${COLOR_BOLD}Video Transcoder v1.0.0${COLOR_RESET}"
+    echo -e "  ${COLOR_BOLD}Video Transcoder v1.1.0 (Kdenlive / Fedora Edition)${COLOR_RESET}"
     echo -e "${COLOR_BLUE}──────────────────────────────────────────────────────────────────────────────${COLOR_RESET}"
     echo -e "  ${COLOR_DIM}Video codec  :${COLOR_RESET} ${codec_desc}"
     echo -e "  ${COLOR_DIM}Framerate    :${COLOR_RESET} ${TARGET_FPS} fps CFR (-fps_mode cfr)"
-    echo -e "  ${COLOR_DIM}Color        :${COLOR_RESET} Rec.709 (BT.709, TV range) · auto HDR→SDR tone-mapping"
+    echo -e "  ${COLOR_DIM}Color        :${COLOR_RESET} Rec.709 (BT.709, TV range) · auto HDR→SDR tone-mapping (${TONEMAP_ALGO}, npl=${NPL_VAL})"
     echo -e "  ${COLOR_DIM}Audio        :${COLOR_RESET} PCM 16-bit 48 kHz (pcm_s16le)"
     if [ -n "${SPECIFIC_FILE}" ]; then
         echo -e "  ${COLOR_DIM}Source file  :${COLOR_RESET} ${SPECIFIC_FILE}"
@@ -330,8 +375,8 @@ run_interactive_mode() {
 
     echo ""
     echo "Select target video format:"
-    echo -e "  ${COLOR_BOLD}1)${COLOR_RESET} Apple ProRes 422 LT (10-bit 4:2:2, ultra-smooth editing, ~45 GB/h) ${COLOR_GREEN}[Default]${COLOR_RESET}"
-    echo -e "  ${COLOR_BOLD}2)${COLOR_RESET} H.264 All-Intra (8-bit 4:2:0, balance between performance and storage, ~15 GB/h)"
+    echo -e "  ${COLOR_BOLD}1)${COLOR_RESET} H.264 All-Intra (8-bit 4:2:0, Kdenlive editor-friendly, ~15 GB/h) ${COLOR_GREEN}[Default]${COLOR_RESET}"
+    echo -e "  ${COLOR_BOLD}2)${COLOR_RESET} Apple ProRes 422 LT (10-bit 4:2:2, ultra-smooth editing, ~45 GB/h)"
     echo -e "  ${COLOR_BOLD}3)${COLOR_RESET} Exit"
     echo ""
 
@@ -340,8 +385,8 @@ run_interactive_mode() {
     choice_format="${choice_format:-1}"
 
     case "${choice_format}" in
-        1) FORMAT="prores" ;;
-        2) FORMAT="h264" ;;
+        1) FORMAT="h264" ;;
+        2) FORMAT="prores" ;;
         3) echo "Exiting."; exit 0 ;;
         *) echo -e "${COLOR_RED}Invalid choice.${COLOR_RESET}"; exit 1 ;;
     esac
@@ -419,6 +464,48 @@ parse_arguments() {
                     exit 1
                 fi
                 shift 2
+                ;;
+            --tonemap)
+                if [ -z "${2:-}" ]; then
+                    echo -e "${COLOR_RED}[ERROR] Option $1 requires a value (hable, mobius, or reinhard).${COLOR_RESET}" >&2
+                    exit 1
+                fi
+                TONEMAP_ALGO=$(echo "$2" | tr '[:upper:]' '[:lower:]')
+                if [[ ! "${TONEMAP_ALGO}" =~ ^(hable|mobius|reinhard)$ ]]; then
+                    echo -e "${COLOR_RED}[ERROR] Invalid tonemap algorithm: '$2'. Allowed values: hable, mobius, reinhard.${COLOR_RESET}" >&2
+                    exit 1
+                fi
+                shift 2
+                ;;
+            --tonemap=*)
+                local t_val="${1#*=}"
+                TONEMAP_ALGO=$(echo "${t_val}" | tr '[:upper:]' '[:lower:]')
+                if [[ ! "${TONEMAP_ALGO}" =~ ^(hable|mobius|reinhard)$ ]]; then
+                    echo -e "${COLOR_RED}[ERROR] Invalid tonemap algorithm: '${t_val}'. Allowed values: hable, mobius, reinhard.${COLOR_RESET}" >&2
+                    exit 1
+                fi
+                shift
+                ;;
+            --npl)
+                if [ -z "${2:-}" ]; then
+                    echo -e "${COLOR_RED}[ERROR] Option $1 requires a numeric value (e.g. 100).${COLOR_RESET}" >&2
+                    exit 1
+                fi
+                NPL_VAL="$2"
+                if [[ ! "${NPL_VAL}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || [ "${NPL_VAL}" = "0" ]; then
+                    echo -e "${COLOR_RED}[ERROR] Invalid NPL value: '$2'. Must be a positive number (default: 100).${COLOR_RESET}" >&2
+                    exit 1
+                fi
+                shift 2
+                ;;
+            --npl=*)
+                local n_val="${1#*=}"
+                NPL_VAL="${n_val}"
+                if [[ ! "${NPL_VAL}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || [ "${NPL_VAL}" = "0" ]; then
+                    echo -e "${COLOR_RED}[ERROR] Invalid NPL value: '${n_val}'. Must be a positive number (default: 100).${COLOR_RESET}" >&2
+                    exit 1
+                fi
+                shift
                 ;;
             -i|--input)
                 if [ -z "${2:-}" ]; then
@@ -575,6 +662,8 @@ VALID_IS_HDR=()
 VALID_HAS_AUDIO=()
 VALID_TARGET_PATHS=()
 VALID_ORIG_SIZES=()
+VALID_SRC_DESCS=()
+VALID_TARGET_DESCS=()
 TOTAL_SCANNED_COUNT=0
 TOTAL_SKIPPED_COUNT=0
 TOTAL_DURATION_SEC=0
@@ -589,37 +678,23 @@ inspect_and_validate_files() {
     VALID_HAS_AUDIO=()
     VALID_TARGET_PATHS=()
     VALID_ORIG_SIZES=()
+    VALID_SRC_DESCS=()
+    VALID_TARGET_DESCS=()
     TOTAL_DURATION_SEC=0
     TOTAL_SKIPPED_COUNT=0
 
     local candidate_files=()
 
     if [ -n "${SPECIFIC_FILE}" ]; then
-        local bname
-        bname=$(basename "${SPECIFIC_FILE}")
-        if [[ "${bname}" =~ ^\. ]] || [[ "${bname}" =~ _transcoded\.mov$ ]] || [[ "${bname}" =~ _kdenlive\.mov$ ]]; then
-            echo -e "${COLOR_YELLOW}Specified file '${bname}' is hidden or already transcoded.${COLOR_RESET}"
-            exit 0
-        fi
         candidate_files+=("${SPECIFIC_FILE}")
     elif [ "${RECURSIVE}" = true ]; then
         local escaped_output_dir
         escaped_output_dir=$(printf '%s' "${OUTPUT_DIR}" | sed 's/[][*?]/\\&/g')
         while IFS= read -r -d '' file; do
-            local bname
-            bname=$(basename "${file}")
-            if [[ "${bname}" =~ ^\. ]] || [[ "${bname}" =~ _transcoded\.mov$ ]] || [[ "${bname}" =~ _kdenlive\.mov$ ]]; then
-                continue
-            fi
             candidate_files+=("${file}")
         done < <(find "${INPUT_DIR}" -mindepth 1 \( -path "${escaped_output_dir}" -o -name ".*" \) -prune -o -type f \( -iname "*.mov" -o -iname "*.mp4" -o -iname "*.m4v" \) -print0 | sort -z)
     else
         while IFS= read -r -d '' file; do
-            local bname
-            bname=$(basename "${file}")
-            if [[ "${bname}" =~ ^\. ]] || [[ "${bname}" =~ _transcoded\.mov$ ]] || [[ "${bname}" =~ _kdenlive\.mov$ ]]; then
-                continue
-            fi
             candidate_files+=("${file}")
         done < <(find "${INPUT_DIR}" -maxdepth 1 -type f \( -iname "*.mov" -o -iname "*.mp4" -o -iname "*.m4v" \) -print0 | sort -z)
     fi
@@ -640,26 +715,31 @@ inspect_and_validate_files() {
         local bname
         bname=$(basename "${file}")
 
+        if [[ "${bname}" =~ ^\. ]]; then
+            continue
+        fi
+
         if [ ! -s "${file}" ]; then
-            echo -e "  ${COLOR_RED}✖${COLOR_RESET} ${bname} ${COLOR_DIM}(empty file / 0 bytes)${COLOR_RESET}"
+            echo -e "  ${COLOR_YELLOW}⚠${COLOR_RESET} ${bname} ${COLOR_DIM}(empty file / 0 bytes - skipped)${COLOR_RESET}"
             TOTAL_SKIPPED_COUNT=$((TOTAL_SKIPPED_COUNT + 1))
             continue
         fi
 
         local probe_v
         if ! probe_v=$(ffprobe -v error -select_streams v:0 \
-            -show_entries stream=codec_name,width,height,r_frame_rate,avg_frame_rate,color_space,color_transfer,color_primaries \
+            -show_entries stream=codec_name,pix_fmt,width,height,r_frame_rate,avg_frame_rate,color_space,color_transfer,color_primaries \
             -show_entries format=duration \
             -of default=noprint_wrappers=1 "${file}" 2>&1); then
-            echo -e "  ${COLOR_RED}✖${COLOR_RESET} ${bname} ${COLOR_DIM}(invalid or corrupted video stream)${COLOR_RESET}"
+            echo -e "  ${COLOR_YELLOW}⚠${COLOR_RESET} ${bname} ${COLOR_DIM}(no valid video stream detected - skipped)${COLOR_RESET}"
             TOTAL_SKIPPED_COUNT=$((TOTAL_SKIPPED_COUNT + 1))
             continue
         fi
 
-        local codec_name="" width="" height="" r_fps="" avg_fps="" c_space="" c_trc="" c_prim="" duration=""
+        local codec_name="" pix_fmt="" width="" height="" r_fps="" avg_fps="" c_space="" c_trc="" c_prim="" duration=""
         while IFS='=' read -r key val; do
             case "${key}" in
                 codec_name) codec_name="${val}" ;;
+                pix_fmt) pix_fmt="${val}" ;;
                 width) width="${val}" ;;
                 height) height="${val}" ;;
                 r_frame_rate) r_fps="${val}" ;;
@@ -672,7 +752,14 @@ inspect_and_validate_files() {
         done <<< "${probe_v}"
 
         if [ -z "${codec_name}" ] || [ -z "${width}" ] || [ -z "${height}" ]; then
-            echo -e "  ${COLOR_RED}✖${COLOR_RESET} ${bname} ${COLOR_DIM}(no video stream detected)${COLOR_RESET}"
+            echo -e "  ${COLOR_YELLOW}⚠${COLOR_RESET} ${bname} ${COLOR_DIM}(no valid video stream detected - skipped)${COLOR_RESET}"
+            TOTAL_SKIPPED_COUNT=$((TOTAL_SKIPPED_COUNT + 1))
+            continue
+        fi
+
+        # Check if already processed with script output suffix
+        if [[ "${bname}" =~ _transcoded\.mov$ ]] || [[ "${bname}" =~ _kdenlive\.mov$ ]]; then
+            echo -e "  ${COLOR_YELLOW}↷${COLOR_RESET} ${bname} ${COLOR_DIM}(already has transcoded output suffix - skipped)${COLOR_RESET}"
             TOTAL_SKIPPED_COUNT=$((TOTAL_SKIPPED_COUNT + 1))
             continue
         fi
@@ -682,6 +769,66 @@ inspect_and_validate_files() {
         local fps_mode="CFR"
         if [ -n "${r_fps}" ] && [ -n "${avg_fps}" ] && [ "${r_fps}" != "${avg_fps}" ]; then
             fps_mode="VFR"
+        fi
+
+        # Check if already an All-Intra CFR Rec.709 H.264 file
+        if [ "${codec_name}" = "h264" ] && [ "${pix_fmt}" = "yuv420p" ] && [ "${fps_mode}" = "CFR" ]; then
+            if [[ "${c_trc}" =~ bt709 ]] || [[ "${c_space}" =~ bt709 ]] || [[ "${c_prim}" =~ bt709 ]]; then
+                local sample_types
+                sample_types=$(ffprobe -v error -select_streams v:0 -show_entries frame=pict_type -read_intervals "%+#5" -of csv=p=0 "${file}" 2>/dev/null | tr -d ',\r\n ' || true)
+                if [[ -n "${sample_types}" ]] && [[ ! "${sample_types}" =~ [^I] ]]; then
+                    echo -e "  ${COLOR_YELLOW}↷${COLOR_RESET} ${bname} ${COLOR_DIM}(already H.264 All-Intra CFR Rec.709 - skipped)${COLOR_RESET}"
+                    TOTAL_SKIPPED_COUNT=$((TOTAL_SKIPPED_COUNT + 1))
+                    continue
+                fi
+            fi
+        fi
+
+        # HDR vs SDR automatic detection
+        local is_hdr=false
+        local hdr_type=""
+        if [ "${c_trc}" = "arib-std-b67" ]; then
+            is_hdr=true
+            hdr_type="HLG"
+        elif [ "${c_trc}" = "smpte2084" ]; then
+            is_hdr=true
+            hdr_type="PQ"
+        elif [[ "${c_space}" =~ bt2020nc|bt2020 ]] || [[ "${c_prim}" =~ bt2020 ]]; then
+            is_hdr=true
+            hdr_type="BT.2020"
+        elif [[ "${pix_fmt}" =~ 10le|10bit|p010le ]]; then
+            is_hdr=true
+            hdr_type="10-bit HDR"
+        fi
+
+        local bit_depth="8-bit"
+        if [[ "${pix_fmt}" =~ 10le|10bit|p010le ]]; then
+            bit_depth="10-bit"
+        elif [[ "${pix_fmt}" =~ 12le|12bit ]]; then
+            bit_depth="12-bit"
+        fi
+
+        local codec_display=""
+        case "${codec_name}" in
+            h264|avc*) codec_display="H.264" ;;
+            hevc|h265) codec_display="HEVC" ;;
+            prores*)   codec_display="ProRes" ;;
+            *)         codec_display=$(echo "${codec_name}" | tr '[:lower:]' '[:upper:]') ;;
+        esac
+
+        local src_info=""
+        local target_info=""
+        local codec_target_name="H.264 All-Intra"
+        if [ "${FORMAT}" = "prores" ]; then
+            codec_target_name="ProRes 422 LT"
+        fi
+
+        if [ "${is_hdr}" = true ]; then
+            src_info="${codec_display} ${bit_depth} HDR (${hdr_type})"
+            target_info="Tone-Mapping (${TONEMAP_ALGO}) + ${codec_target_name}"
+        else
+            src_info="${codec_display} ${bit_depth} SDR"
+            target_info="Conversione diretta ${codec_target_name}"
         fi
 
         local res_label="${height}p"
@@ -695,16 +842,6 @@ inspect_and_validate_files() {
             res_label="720p vertical"
         elif [ "${width}" -eq 1080 ] && [ "${height}" -eq 1920 ]; then
             res_label="1080p vertical"
-        fi
-
-        local codec_upper
-        codec_upper=$(echo "${codec_name}" | tr '[:lower:]' '[:upper:]')
-
-        local is_hdr=false
-        local hdr_tag=""
-        if [[ "${c_trc}" =~ arib-std-b67|smpte2084 ]] || [[ "${c_prim}" =~ bt2020 ]] || [[ "${c_space}" =~ bt2020 ]]; then
-            is_hdr=true
-            hdr_tag=" · HDR"
         fi
 
         local has_audio=false
@@ -774,7 +911,11 @@ inspect_and_validate_files() {
         local dur_float="${duration:-0}"
         TOTAL_DURATION_SEC=$(awk -v t="${TOTAL_DURATION_SEC}" -v d="${dur_float}" 'BEGIN {printf "%.6f", t + d}')
 
-        local res_desc="${res_label} @ ${fps_val}fps ${fps_mode} · ${codec_upper}${hdr_tag}"
+        local hdr_tag=""
+        if [ "${is_hdr}" = true ]; then
+            hdr_tag=" · HDR (${hdr_type})"
+        fi
+        local res_desc="${res_label} @ ${fps_val}fps ${fps_mode} · ${codec_display} ${bit_depth}${hdr_tag}"
         echo -e "  ${COLOR_GREEN}✔${COLOR_RESET} ${bname} ${COLOR_DIM}(${res_desc})${COLOR_RESET}"
 
         VALID_FILES+=("${file}")
@@ -786,6 +927,8 @@ inspect_and_validate_files() {
         VALID_HAS_AUDIO+=("${has_audio}")
         VALID_TARGET_PATHS+=("${candidate_target}")
         VALID_ORIG_SIZES+=("${file_size:-0}")
+        VALID_SRC_DESCS+=("${src_info}")
+        VALID_TARGET_DESCS+=("${target_info}")
     done
 
     echo ""
@@ -794,6 +937,10 @@ inspect_and_validate_files() {
 check_disk_space() {
     local valid_count=${#VALID_FILES[@]}
     if [ "${valid_count}" -eq 0 ]; then
+        if [ "${TOTAL_SCANNED_COUNT}" -gt 0 ] && [ "${TOTAL_SKIPPED_COUNT}" -eq "${TOTAL_SCANNED_COUNT}" ]; then
+            echo -e "${COLOR_YELLOW}All scanned files were skipped (already converted or invalid). Nothing to do.${COLOR_RESET}"
+            exit 0
+        fi
         echo -e "${COLOR_RED}[ERROR] No valid source files to convert.${COLOR_RESET}" >&2
         exit 1
     fi
@@ -969,10 +1116,13 @@ convert_files() {
         local has_audio="${VALID_HAS_AUDIO[$i]}"
         local res_desc="${VALID_RES_STRS[$i]}"
 
+        local src_info="${VALID_SRC_DESCS[$i]}"
+        local target_info="${VALID_TARGET_DESCS[$i]}"
+
         mkdir -p "${target_dir}"
 
         local idx=$((i + 1))
-        echo -e "[${idx}/${total_files}] Processing: ${bname} ${COLOR_DIM}(${res_desc})${COLOR_RESET}"
+        echo -e "[${idx}/${total_files}] ${bname} | Sorgente: ${src_info} -> ${target_info}"
         echo -e "      → ${final_target}"
 
         CURRENT_PARTIAL="${partial_target}"
@@ -983,19 +1133,24 @@ convert_files() {
             -fps_mode cfr -r "${TARGET_FPS}"
         )
 
+        local vf_filter=""
         if [ "${FORMAT}" = "prores" ]; then
-            ffmpeg_cmd+=( -c:v prores_ks -profile:v 1 -pix_fmt yuv422p10le )
             if [ "${is_hdr}" = true ]; then
-                ffmpeg_cmd+=( -vf "zscale=t=linear:npl=100,tonemap=hable,zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv422p10le" )
+                vf_filter="fps=${TARGET_FPS},zscale=t=linear:npl=${NPL_VAL},format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=${TONEMAP_ALGO}:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv422p10le"
+            else
+                vf_filter="fps=${TARGET_FPS},format=yuv422p10le"
             fi
+            ffmpeg_cmd+=( -vf "${vf_filter}" -c:v prores_ks -profile:v 1 -pix_fmt yuv422p10le )
         else
-            ffmpeg_cmd+=( -c:v libx264 -preset fast -crf 18 -g 1 -pix_fmt yuv420p )
             if [ "${is_hdr}" = true ]; then
-                ffmpeg_cmd+=( -vf "zscale=t=linear:npl=100,tonemap=hable,zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p" )
+                vf_filter="fps=${TARGET_FPS},zscale=t=linear:npl=${NPL_VAL},format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=${TONEMAP_ALGO}:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
+            else
+                vf_filter="fps=${TARGET_FPS},format=yuv420p"
             fi
+            ffmpeg_cmd+=( -vf "${vf_filter}" -c:v libx264 -preset fast -crf 18 -g 1 -pix_fmt yuv420p -x264-params "colorprim=bt709:transfer=bt709:colormatrix=bt709" )
         fi
 
-        ffmpeg_cmd+=( -color_primaries bt709 -color_trc bt709 -colorspace bt709 )
+        ffmpeg_cmd+=( -color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv )
 
         if [ "${has_audio}" = true ]; then
             ffmpeg_cmd+=( -c:a pcm_s16le -ar 48000 )

@@ -76,12 +76,15 @@ The script uses standard POSIX/GNU utilities and FFmpeg:
 
 #### Fedora / RHEL
 ```bash
-# Enable RPM Fusion (required for full FFmpeg with non-free codecs)
+# Enable RPM Fusion (required for full FFmpeg with non-free codecs and filters)
 sudo dnf install -y https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \
                     https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
 
-# Install FFmpeg and required utilities
-sudo dnf install -y ffmpeg coreutils gawk libnotify
+# Swap stripped ffmpeg-free with full FFmpeg build from RPM Fusion
+sudo dnf swap -y ffmpeg-free ffmpeg --allowerasing
+
+# Install FFmpeg, libzimg (for zscale filter), and required utilities
+sudo dnf install -y ffmpeg libzimg coreutils gawk libnotify
 ```
 
 #### Ubuntu / Debian
@@ -160,9 +163,13 @@ ARGUMENTS:
                            (Default: current directory)
 
 OPTIONS:
-  -f, --format FORMAT      Output codec: prores (Apple ProRes 422 LT) or h264 (All-Intra)
-                           (Default: prores)
+  -f, --format FORMAT      Output codec: h264 (All-Intra) or prores (Apple ProRes 422 LT)
+                           (Default: h264)
   -r, --fps FPS            Constant target framerate (CFR): 30 or 60 (Default: 30)
+      --tonemap ALGO       HDR tone-mapping algorithm: hable, mobius, or reinhard
+                           (Default: hable)
+      --npl NITS           Nominal Peak Luminance in nits for HDR tone-mapping
+                           (Default: 100)
   -i, --input DIR|FILE     Source directory or video file (alternative to positional argument)
   -o, --output DIR         Destination directory for converted videos
                            (Default: <input>/transcoded)
@@ -176,9 +183,19 @@ OPTIONS:
 
 ### Examples
 
-**Transcode current directory to Apple ProRes 422 LT at 30 fps:**
+**Transcode current directory to H.264 All-Intra at 30 fps (default):**
 ```bash
 transcoder
+```
+
+**Custom tone-mapping curve with Mobius algorithm and 120 nits peak luminance:**
+```bash
+transcoder ~/Videos/iPhone --tonemap mobius --npl 120
+```
+
+**Transcode to Apple ProRes 422 LT at 30 fps:**
+```bash
+transcoder ~/Videos/RawFootage -f prores
 ```
 
 **Safely transcode and replace files in-place one-by-one:**
@@ -188,7 +205,7 @@ transcoder ~/Videos/RawFootage -w
 
 **Convert a single clip to H.264 All-Intra:**
 ```bash
-transcoder my_clip.mov -f h264
+transcoder my_clip.mov
 ```
 
 **Convert a single clip in-place:**
@@ -203,7 +220,7 @@ transcoder ~/Videos/RawFootage -r 60 -o ~/Videos/EditingReady
 
 **Recursively process an entire directory structure:**
 ```bash
-transcoder ~/Videos/ProjectAlpha -R -f prores
+transcoder ~/Videos/ProjectAlpha -R -f h264
 ```
 
 **Perform a dry run to inspect clips and check disk capacity:**
@@ -219,15 +236,30 @@ transcoder ~/Videos/RawFootage -d
 
 | Preset | FFmpeg Codec | Details | Recommended For |
 | :--- | :--- | :--- | :--- |
+| `h264` | `libx264` (All-Intra) | 8-bit 4:2:0, CRF 18, `g=1`, ~15 GB/h @ 1080p30 | Kdenlive, Linux editing, laptop drives, balanced performance |
 | `prores` | `prores_ks` (profile 1) | 10-bit 4:2:2, Apple ProRes 422 LT, ~45 GB/h @ 1080p30 | Desktop editing workstations, highest color precision |
-| `h264` | `libx264` (All-Intra) | 8-bit 4:2:0, CRF 18, `g=1`, ~15 GB/h @ 1080p30 | Laptops, portable drives, balanced storage and performance |
 
 ### Color Space & HDR Tone Mapping
-When HDR is detected via color transfer characteristics (`arib-std-b67` for HLG, `smpte2084` for HDR10/Dolby Vision) or `bt2020` color primaries:
+The script dynamically configures the video filter chain based on input inspection:
+
+- **HDR Sources (HLG / Dolby Vision / PQ / BT.2020 / 10-bit):**
+  Uses linear light conversion and filmic tone mapping with `desat=0` to preserve skin tone warmth and natural complexion:
+  ```bash
+  -vf "fps=30,zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
+  ```
+- **SDR Sources (Rec.709 8-bit):**
+  Direct pixel format and framerate normalization without darkening:
+  ```bash
+  -vf "fps=30,format=yuv420p"
+  ```
+
+All H.264 files are strictly encoded with broadcast Rec.709 TV range tags and uncompressed 16-bit PCM audio:
+```bash
+-fps_mode cfr -r <FPS> -c:v libx264 -preset fast -crf 18 -g 1 -pix_fmt yuv420p \
+-color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv \
+-x264-params "colorprim=bt709:transfer=bt709:colormatrix=bt709" \
+-c:a pcm_s16le -ar 48000
 ```
--vf "zscale=t=linear:npl=100,tonemap=hable,zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv422p10le"
-```
-This performs a linear light conversion, applies the filmic **Hable** tone curve to compress highlights gracefully, and tags the stream as standard Rec.709 TV range (`-color_primaries bt709 -color_trc bt709 -colorspace bt709`).
 
 ### Disk Space Safety Pre-flight
 Before encoding begins, the script calculates:

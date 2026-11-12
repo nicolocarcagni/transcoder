@@ -48,14 +48,16 @@ check: lint test
 test:
 	@echo "Running tests..."
 	@bash tests/test_path_handling.sh
+	@bash tests/test_h264_tone_mapping.sh
 
 lint:
 	@echo "Checking syntax with bash -n..."
 	bash -n "$(SOURCE_SCRIPT)"
 	bash -n tests/test_path_handling.sh
+	bash -n tests/test_h264_tone_mapping.sh
 	@if command -v shellcheck >/dev/null 2>&1; then \
 		echo "Running ShellCheck..."; \
-		shellcheck "$(SOURCE_SCRIPT)" tests/test_path_handling.sh; \
+		shellcheck "$(SOURCE_SCRIPT)" tests/test_path_handling.sh tests/test_h264_tone_mapping.sh; \
 	else \
 		echo "ShellCheck not found. Skipped ShellCheck step."; \
 	fi
